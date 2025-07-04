@@ -810,7 +810,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "create_entities":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createEntities(args.entities as Entity[]), null, 2) }] };
+      // Transform simplified input to full Entity objects
+      const fullEntities = (args.entities as any[]).map(e => 
+        createEntity(e.name, e.entityType, e.observations)
+      );
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createEntities(fullEntities), null, 2) }] };
     case "create_relations":
       const relResult = await knowledgeGraphManager.createRelations(args.relations as Relation[]);
       let relMessage = "";
