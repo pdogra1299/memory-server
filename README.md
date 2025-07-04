@@ -230,6 +230,20 @@ Example:
   - Returns entities sorted by access count
   - Useful for identifying high-priority refresh targets
 
+- **verify_graph_integrity**
+  - Verify the integrity of the knowledge graph by checking for orphaned entities in relationships
+  - Input:
+    - `maxSuggestions` (number, optional): Maximum number of similar entity suggestions to return for each orphaned entity (default: 3)
+  - Returns:
+    - `isValid` (boolean): Whether all relationships reference valid entities
+    - `orphanedRelations` (array): List of relations with missing entities, including:
+      - The problematic relation
+      - Which entity is missing (from/to)
+      - Fuzzy search suggestions for similar existing entities
+    - `summary`: Overview with total/valid/orphaned relation counts
+  - Uses Levenshtein distance for fuzzy matching
+  - Helps identify and fix hallucinated entity references
+
 # Usage with Claude Desktop
 
 ### Setup

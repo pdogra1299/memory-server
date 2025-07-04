@@ -77,6 +77,40 @@ function createEntity(name: string, entityType: string, observations: string[], 
   };
 }
 
+// Helper function to calculate Levenshtein distance for fuzzy matching
+function levenshteinDistance(str1: string, str2: string): number {
+  const matrix: number[][] = [];
+  
+  // If one string is empty, return the length of the other
+  if (str1.length === 0) return str2.length;
+  if (str2.length === 0) return str1.length;
+  
+  // Initialize the matrix
+  for (let i = 0; i <= str1.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= str2.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  // Calculate distances
+  for (let i = 1; i <= str1.length; i++) {
+    for (let j = 1; j <= str2.length; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  
+  return matrix[str1.length][str2.length];
+}
+
 // The KnowledgeGraphManager class contains all operations to interact with the knowledge graph
 class KnowledgeGraphManager {
   private writeLock = false;
@@ -531,6 +565,139 @@ class KnowledgeGraphManager {
       this.releaseWriteLock();
     }
   }
+
+  // Verify graph integrity by checking for orphaned entities in relationships
+  async verifyGraphIntegrity(maxSuggestions: number = 3): Promise<{
+    isValid: boolean;
+    orphanedRelations: Array<{
+      relation: Relation;
+      missingEntity: string;
+      entityPosition: 'from' | 'to';
+      suggestions: Array<{
+        name: string;
+        entityType: string;
+        similarity: number;
+      }>;
+    }>;
+    summary: {
+      totalRelations: number;
+      validRelations: number;
+      orphanedRelations: number;
+      uniqueOrphanedEntities: string[];
+    };
+  }> {
+    const graph = await this.loadGraph();
+    const entityNames = new Set(graph.entities.map(e => e.name));
+    const orphanedRelations: Array<{
+      relation: Relation;
+      missingEntity: string;
+      entityPosition: 'from' | 'to';
+      suggestions: Array<{
+        name: string;
+        entityType: string;
+        similarity: number;
+      }>;
+    }> = [];
+    const uniqueOrphanedEntities = new Set<string>();
+
+    // Check each relation for orphaned entities
+    for (const relation of graph.relations) {
+      const fromExists = entityNames.has(relation.from);
+      const toExists = entityNames.has(relation.to);
+
+      if (!fromExists) {
+        uniqueOrphanedEntities.add(relation.from);
+        const suggestions = this.findSimilarEntities(relation.from, graph.entities, maxSuggestions);
+        orphanedRelations.push({
+          relation,
+          missingEntity: relation.from,
+          entityPosition: 'from',
+          suggestions
+        });
+      }
+
+      if (!toExists) {
+        uniqueOrphanedEntities.add(relation.to);
+        const suggestions = this.findSimilarEntities(relation.to, graph.entities, maxSuggestions);
+        orphanedRelations.push({
+          relation,
+          missingEntity: relation.to,
+          entityPosition: 'to',
+          suggestions
+        });
+      }
+    }
+
+    const isValid = orphanedRelations.length === 0;
+    const totalRelations = graph.relations.length;
+    const validRelations = totalRelations - orphanedRelations.length;
+
+    return {
+      isValid,
+      orphanedRelations,
+      summary: {
+        totalRelations,
+        validRelations,
+        orphanedRelations: orphanedRelations.length,
+        uniqueOrphanedEntities: Array.from(uniqueOrphanedEntities)
+      }
+    };
+  }
+
+  // Helper to find similar entities using fuzzy matching
+  private findSimilarEntities(targetName: string, entities: Entity[], maxSuggestions: number): Array<{
+    name: string;
+    entityType: string;
+    similarity: number;
+  }> {
+    const targetLower = targetName.toLowerCase();
+    const suggestions: Array<{
+      name: string;
+      entityType: string;
+      similarity: number;
+      distance: number;
+    }> = [];
+
+    for (const entity of entities) {
+      const entityLower = entity.name.toLowerCase();
+      
+      // Calculate similarity metrics
+      const distance = levenshteinDistance(targetLower, entityLower);
+      const maxLength = Math.max(targetName.length, entity.name.length);
+      const similarity = 1 - (distance / maxLength);
+      
+      // Also check for substring matches (case-insensitive)
+      const hasSubstring = entityLower.includes(targetLower) || targetLower.includes(entityLower);
+      
+      // Boost similarity for substring matches
+      const adjustedSimilarity = hasSubstring ? Math.max(similarity, 0.7) : similarity;
+      
+      // Only include if similarity is above threshold
+      if (adjustedSimilarity > 0.3) {
+        suggestions.push({
+          name: entity.name,
+          entityType: entity.entityType,
+          similarity: adjustedSimilarity,
+          distance
+        });
+      }
+    }
+
+    // Sort by similarity (descending) and distance (ascending)
+    suggestions.sort((a, b) => {
+      if (Math.abs(a.similarity - b.similarity) < 0.01) {
+        return a.distance - b.distance;
+      }
+      return b.similarity - a.similarity;
+    });
+
+    // Return top suggestions
+    return suggestions.slice(0, maxSuggestions).map(s => ({
+      name: s.name,
+      entityType: s.entityType,
+      similarity: Math.round(s.similarity * 100) / 100
+    }));
+  }
 }
 
 const knowledgeGraphManager = new KnowledgeGraphManager();
@@ -797,6 +964,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["minAccessCount"],
         },
       },
+      {
+        name: "verify_graph_integrity",
+        description: "Verify the integrity of the knowledge graph by checking for orphaned entities in relationships. Returns hallucinated entity names with fuzzy search suggestions.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            maxSuggestions: { 
+              type: "number", 
+              description: "Maximum number of similar entity suggestions to return for each orphaned entity (default: 3)" 
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -892,6 +1072,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text: JSON.stringify(updatedEntity, null, 2) }] };
     case "get_frequently_used":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.getFrequentlyUsed(args.minAccessCount as number, args.entityType as string | undefined), null, 2) }] };
+    case "verify_graph_integrity":
+      const integrityResult = await knowledgeGraphManager.verifyGraphIntegrity(args.maxSuggestions as number | undefined);
+      let integrityMessage = "";
+      
+      if (integrityResult.isValid) {
+        integrityMessage = "✅ Graph integrity verified: All relationships reference valid entities.\n\n";
+      } else {
+        integrityMessage = `⚠️ Graph integrity issues found: ${integrityResult.orphanedRelations.length} orphaned relationship(s)\n\n`;
+        integrityMessage += `Unique hallucinated entities (${integrityResult.summary.uniqueOrphanedEntities.length}):\n`;
+        integrityResult.summary.uniqueOrphanedEntities.forEach(entity => {
+          integrityMessage += `- ${entity}\n`;
+        });
+        integrityMessage += "\nDetailed orphaned relationships:\n";
+        integrityResult.orphanedRelations.forEach((orphan, index) => {
+          integrityMessage += `\n${index + 1}. Relation: ${orphan.relation.from} --[${orphan.relation.relationType}]--> ${orphan.relation.to}\n`;
+          integrityMessage += `   Missing entity: '${orphan.missingEntity}' (${orphan.entityPosition})\n`;
+          if (orphan.suggestions.length > 0) {
+            integrityMessage += `   Did you mean:\n`;
+            orphan.suggestions.forEach(suggestion => {
+              integrityMessage += `   - ${suggestion.name} (${suggestion.entityType}) - ${Math.round(suggestion.similarity * 100)}% match\n`;
+            });
+          } else {
+            integrityMessage += `   No similar entities found.\n`;
+          }
+        });
+      }
+      
+      integrityMessage += `\nSummary:\n`;
+      integrityMessage += `- Total relations: ${integrityResult.summary.totalRelations}\n`;
+      integrityMessage += `- Valid relations: ${integrityResult.summary.validRelations}\n`;
+      integrityMessage += `- Orphaned relations: ${integrityResult.summary.orphanedRelations}\n`;
+      
+      return { content: [{ type: "text", text: integrityMessage + "\n" + JSON.stringify(integrityResult, null, 2) }] };
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
