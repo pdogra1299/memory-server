@@ -405,9 +405,9 @@ class KnowledgeGraphManager {
       e.observations.some(o => o.toLowerCase().includes(query.toLowerCase()))
     );
   
-    // Increment access count for searched entities
-    for (const entity of filteredEntities) {
-      await this.incrementAccessCount(entity.name);
+    // Batch increment access count for searched entities
+    if (filteredEntities.length > 0) {
+      await this.batchIncrementAccessCount(filteredEntities.map(e => e.name));
     }
   
     // Create a Set of filtered entity names for quick lookup
@@ -432,9 +432,9 @@ class KnowledgeGraphManager {
     // Filter entities
     const filteredEntities = graph.entities.filter(e => names.includes(e.name));
   
-    // Increment access count for opened entities
-    for (const entity of filteredEntities) {
-      await this.incrementAccessCount(entity.name);
+    // Batch increment access count for opened entities
+    if (filteredEntities.length > 0) {
+      await this.batchIncrementAccessCount(filteredEntities.map(e => e.name));
     }
   
     // Create a Set of filtered entity names for quick lookup
@@ -559,6 +559,31 @@ class KnowledgeGraphManager {
       if (entity) {
         entity.metadata.accessCount++;
         entity.metadata.lastAccessedAt = new Date().toISOString();
+        await this.saveGraph(graph);
+      }
+    } finally {
+      this.releaseWriteLock();
+    }
+  }
+
+  // Batch increment access count to avoid multiple write locks
+  async batchIncrementAccessCount(entityNames: string[]): Promise<void> {
+    await this.acquireWriteLock();
+    try {
+      const graph = await this.loadGraph();
+      const now = new Date().toISOString();
+      let hasChanges = false;
+      
+      for (const entityName of entityNames) {
+        const entity = graph.entities.find(e => e.name === entityName);
+        if (entity) {
+          entity.metadata.accessCount++;
+          entity.metadata.lastAccessedAt = now;
+          hasChanges = true;
+        }
+      }
+      
+      if (hasChanges) {
         await this.saveGraph(graph);
       }
     } finally {
